@@ -11,7 +11,7 @@ services:
       - /dev/bus/usb:/dev/bus/usb
     
     ports:
-      - "8080:80"          # Web interface
+      - "1082:80"        # Web interface
       - "30005:30005"      # Beast output
       - "30003:30003"      # SBS output
     
@@ -29,12 +29,10 @@ services:
       # Location (CHANGE THESE TO YOUR COORDINATES)
       - READSB_LAT=1.345073
       - READSB_LON=103.946810
-      - READSB_ALT=30m
+      - READSB_ALT=30
       
       # ADSB.lol Feed Configuration
-      - ULTRAFEEDER_CONFIG=
-          adsb,in.adsb.lol,30004,beast_reduce_plus_out;
-          mlat,in.adsb.lol,31090,--lat,1.345073,--lon,103.946810,--alt,30,      mlat,in.adsb.lol,31090,--lat,1.345073,--lon,103.946810,--alt,30,--user,Singapore6441
+      - ULTRAFEEDER_CONFIG=adsb,in.adsb.lol,30004,beast_reduce_plus_out,uuid=87ae0f6b-a467-4a5c-9e27-b252c75dd769
       
       # Web interface settings
       - READSB_NET_API_PORT=30152
