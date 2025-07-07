@@ -101,3 +101,6 @@ config.bak
 *.rar
 *.7z
 venv/
+adsb_collectd/
+adsb_data/
+adsb_history/

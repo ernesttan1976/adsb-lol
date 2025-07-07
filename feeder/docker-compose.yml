@@ -43,9 +43,9 @@ services:
       - UUID=87ae0f6b-a467-4a5c-9e27-b252c75dd769
 
     volumes:
-      - adsb_data:/opt/adsb
-      - adsb_history:/var/globe_history
-      - adsb_collectd:/var/lib/collectd
+      - ./adsb_data:/opt/adsb
+      - ./adsb_history:/var/globe_history
+      - ./adsb_collectd:/var/lib/collectd
     
     tmpfs:
       - /tmp:exec,size=64M
