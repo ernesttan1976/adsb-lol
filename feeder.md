@@ -410,3 +410,12 @@ docker-compose down && docker-compose up -d
 ```
 
 This setup will have your WSL-based feeder contributing ADS-B and MLAT data to ADSB.lol, with the option to feed multiple aggregators simultaneously.
+
+
+
+Show Aircraft
+
+```
+# Shows aircraft in real-time SBS format (very readable)
+docker exec adsb-ultrafeeder nc localhost 30003
+```
