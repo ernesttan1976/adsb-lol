@@ -1,0 +1,12 @@
+{
+  "name": "beast-processor",
+  "version": "1.0.0",
+  "description": "High-performance Beast data processor for ADS-B",
+  "main": "beast-processor.js",
+  "scripts": {
+    "start": "node beast-processor.js"
+  },
+  "engines": {
+    "node": ">=16"
+  }
+}
