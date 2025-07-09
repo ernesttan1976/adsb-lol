@@ -104,3 +104,8 @@ venv/
 adsb_collectd/
 adsb_data/
 adsb_history/
+output/
+enhanced_json/
+data/
+readsb_json/
+timestamped_json/
