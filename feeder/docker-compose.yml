@@ -12,39 +12,45 @@ services:
     
     ports:
       - "1082:80"        # Web interface
-      - "30005:30005"      # Beast output
-      - "30003:30003"      # SBS output
+      - "30005:30005"    # Beast output
+      - "30003:30003"    # SBS output
     
     environment:
       # Logging
       - LOGLEVEL=error
       - TZ=Asia/Singapore
       
-      # SDR Configuration
+      # SDR Configuration - optimized settings
       - READSB_DEVICE_TYPE=rtlsdr
       - READSB_RTLSDR_DEVICE=00000001
-      - READSB_GAIN=20
+      - READSB_GAIN=auto
       - READSB_RTLSDR_PPM=0
 
-      # Location (CHANGE THESE TO YOUR COORDINATES)
+      # Location
       - READSB_LAT=1.345073
       - READSB_LON=103.946810
       - READSB_ALT=30
 
+      # UUID (used by all services)
+      - UUID=87ae0f6b-a467-4a5c-9e27-b252c75dd769
+      
+      # MLAT User - FIXED (replace with your actual username)
+      - MLAT_USER=Singapore6441
+      
       # ADSB.lol Feed Configuration
       - ULTRAFEEDER_CONFIG=adsb,in.adsb.lol,30004,beast_reduce_plus_out,uuid=87ae0f6b-a467-4a5c-9e27-b252c75dd769
       
-      # MLAT Configuration - ADD THIS
-      - MLAT_CONFIG=feed.adsb.lol,31090,39000,--user Singapore6441 --privacy --uuid 87ae0f6b-a467-4a5c-9e27-b252c75dd769
-
-
+      # MLAT Configuration - FIXED (no duplicate --user)
+      - MLAT_CONFIG=feed.adsb.lol,31090,39000,--privacy
+      
       # Web interface settings
       - READSB_NET_API_PORT=30152
       - TAR1090_DEFAULTCENTERLAT=1.345073
       - TAR1090_DEFAULTCENTERLON=103.946810
       - TAR1090_DEFAULTZOOMLVL=8
       
-      - UUID=87ae0f6b-a467-4a5c-9e27-b252c75dd769
+      # Statistics reporting
+      - READSB_STATS_EVERY=60
 
     volumes:
       - ./adsb_data:/opt/adsb
