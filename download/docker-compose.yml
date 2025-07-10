@@ -72,10 +72,17 @@ services:
     
     working_dir: /app
     
-    command: node beast-processor.js
+    command: sh -c "npm install && npm start"
     
     networks:
       - adsb_network
+    
+    healthcheck:
+      test: ["CMD", "test", "-f", "/app/output/latest.json"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
 
 networks:
   adsb_network:

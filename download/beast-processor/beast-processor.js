@@ -4,8 +4,9 @@ const net = require('net');
 const fs = require('fs');
 const path = require('path');
 const { performance } = require('perf_hooks');
+const { latLngToCell } = require('h3-js');
 
-// Complete Mode S decoder implementation
+// Mode S decoder with CPR position decoding
 class ModeS {
   static crc24(data) {
     const poly = 0x1FFF409;
@@ -35,41 +36,6 @@ class ModeS {
     return (msg[4] >>> 3) & 0x1F;
   }
   
-  static altitude(msg) {
-    const tc = this.typecode(msg);
-    if (tc < 9 || tc > 18) return null;
-    
-    const alt_raw = ((msg[5] & 0xFF) << 4) | ((msg[6] & 0xF0) >>> 4);
-    const q_bit = (msg[6] & 0x10) !== 0;
-    
-    if (q_bit) {
-      const alt = ((alt_raw & 0x0FE0) >>> 1) | (alt_raw & 0x000F);
-      return alt * 25 - 1000;
-    } else {
-      return this.gray2alt(alt_raw) * 100 - 1000;
-    }
-  }
-  
-  static gray2alt(gray) {
-    const grayToBinary = (gray) => {
-      let binary = gray;
-      for (let i = 1; i < 12; i++) {
-        binary ^= (binary >>> i);
-      }
-      return binary & 0x7FF;
-    };
-    
-    const binary = grayToBinary(gray);
-    const c1 = (binary & 0x400) ? 5 : 0;
-    const a1 = (binary & 0x200) ? 10 : 0;
-    const c2 = (binary & 0x100) ? 1 : 0;
-    const a2 = (binary & 0x080) ? 20 : 0;
-    const c4 = (binary & 0x040) ? 2 : 0;
-    const a4 = (binary & 0x020) ? 40 : 0;
-    
-    return (c1 + a1 + c2 + a2 + c4 + a4);
-  }
-  
   static callsign(msg) {
     const tc = this.typecode(msg);
     if (tc < 1 || tc > 4) return null;
@@ -92,35 +58,6 @@ class ModeS {
     return callsign.trim();
   }
   
-  static velocity(msg) {
-    const tc = this.typecode(msg);
-    if (tc !== 19) return null;
-    
-    const subtype = (msg[4] >>> 1) & 0x07;
-    
-    if (subtype === 1 || subtype === 2) {
-      const ew_dir = (msg[5] & 0x04) !== 0;
-      const ew_vel = ((msg[5] & 0x03) << 8) | msg[6];
-      const ns_dir = (msg[7] & 0x80) !== 0;
-      const ns_vel = ((msg[7] & 0x7F) << 3) | ((msg[8] & 0xE0) >>> 5);
-      
-      if (ew_vel === 0 || ns_vel === 0) return null;
-      
-      const ew_speed = (ew_vel - 1) * (ew_dir ? -1 : 1);
-      const ns_speed = (ns_vel - 1) * (ns_dir ? -1 : 1);
-      
-      const speed = Math.sqrt(ew_speed * ew_speed + ns_speed * ns_speed);
-      const heading = Math.atan2(ew_speed, ns_speed) * 180 / Math.PI;
-      
-      return {
-        speed: Math.round(speed),
-        heading: heading < 0 ? heading + 360 : heading
-      };
-    }
-    
-    return null;
-  }
-  
   static nic(msg) {
     const tc = this.typecode(msg);
     if (tc < 9 || tc > 18) return null;
@@ -132,41 +69,312 @@ class ModeS {
     
     return nicTable[tc] || null;
   }
+  
+  // Extract CPR data from position message
+  static extractCPRData(msg) {
+    const tc = this.typecode(msg);
+    if (tc < 9 || tc > 18) return null;
+    
+    const cpr_format = (msg[6] & 0x04) !== 0; // 0 = even, 1 = odd
+    const cpr_lat = ((msg[6] & 0x03) << 15) | (msg[7] << 7) | ((msg[8] & 0xFE) >>> 1);
+    const cpr_lon = ((msg[8] & 0x01) << 16) | (msg[9] << 8) | msg[10];
+    
+    return {
+      format: cpr_format ? 'odd' : 'even',
+      lat: cpr_lat,
+      lon: cpr_lon,
+      timestamp: Date.now()
+    };
+  }
+  
+  // Local CPR decoding
+  static cprLocalDecode(refLat, refLon, cprLat, cprLon, isOddFormat) {
+    const AirDlat0 = 360.0 / 60;  // even
+    const AirDlat1 = 360.0 / 59;  // odd
+    
+    const dlat = isOddFormat ? AirDlat1 : AirDlat0;
+    const j = Math.floor(refLat / dlat) + Math.floor(0.5 + ((refLat % dlat) / dlat) - (cprLat / 131072.0));
+    const rlat = dlat * (j + cprLat / 131072.0);
+    
+    if (rlat >= 270 || rlat <= -270) return null;
+    
+    const nl = this.cprNL(rlat);
+    if (nl === 0) return null;
+    
+    const dlon = isOddFormat ? 360.0 / Math.max(nl - 1, 1) : 360.0 / Math.max(nl, 1);
+    const m = Math.floor(refLon / dlon) + Math.floor(0.5 + ((refLon % dlon) / dlon) - (cprLon / 131072.0));
+    let rlon = dlon * (m + cprLon / 131072.0);
+    
+    // Normalize longitude
+    while (rlon > 180) rlon -= 360;
+    while (rlon < -180) rlon += 360;
+    
+    return { lat: rlat, lon: rlon };
+  }
+  
+  // Global CPR decoding
+  static cprGlobalDecode(evenFrame, oddFrame) {
+    try {
+      const AirDlat0 = 360.0 / 60;  // even  
+      const AirDlat1 = 360.0 / 59;  // odd
+      
+      const j = Math.floor(((59 * evenFrame.lat - 60 * oddFrame.lat) / 131072) + 0.5);
+      
+      const rlat0 = AirDlat0 * (j % 60 + evenFrame.lat / 131072.0);
+      const rlat1 = AirDlat1 * (j % 59 + oddFrame.lat / 131072.0);
+      
+      if (rlat0 >= 270 || rlat0 <= -270 || rlat1 >= 270 || rlat1 <= -270) {
+        return null;
+      }
+      
+      const nl0 = this.cprNL(rlat0);
+      const nl1 = this.cprNL(rlat1);
+      if (nl0 !== nl1) {
+        return null;
+      }
+      
+      const lat = (oddFrame.timestamp > evenFrame.timestamp) ? rlat1 : rlat0;
+      const nl = this.cprNL(lat);
+      if (nl === 0) return null;
+      
+      const ni = Math.max(nl, 1);
+      const dlon0 = 360.0 / ni;
+      const dlon1 = 360.0 / Math.max(ni - 1, 1);
+      
+      const m = Math.floor(((evenFrame.lon * (nl - 1) - oddFrame.lon * nl) / 131072.0) + 0.5);
+      
+      const lon0 = dlon0 * (m % ni + evenFrame.lon / 131072.0);
+      const lon1 = dlon1 * (m % Math.max(ni - 1, 1) + oddFrame.lon / 131072.0);
+      
+      const normalizeLon = (lon) => {
+        while (lon > 180) lon -= 360;
+        while (lon < -180) lon += 360;
+        return lon;
+      };
+      
+      const lon = normalizeLon((oddFrame.timestamp > evenFrame.timestamp) ? lon1 : lon0);
+      
+      return { lat, lon };
+    } catch (error) {
+      return null;
+    }
+  }
+  
+  static cprNL(lat) {
+    if (lat === 0) return 59;
+    if (Math.abs(lat) === 87) return 2;
+    if (Math.abs(lat) > 87) return 1;
+    
+    const nz = 15;
+    const a = 1 - Math.cos(Math.PI / (2 * nz));
+    const b = Math.cos(Math.PI / 180.0 * Math.abs(lat));
+    
+    if (b * b <= a) return 1;
+    
+    const nl = 2 * Math.PI / Math.acos(1 - a / (b * b));
+    return Math.floor(nl);
+  }
 }
 
-class BeastProcessor {
+class EnhancedCPRAircraftTracker {
   constructor() {
-    // Connect to readsb-data-collector container via Docker network
+    this.aircraftStates = new Map();
+    this.frameTimeout = 10000;
+    this.stats = {
+      positionMessages: 0,
+      evenFrames: 0,
+      oddFrames: 0,
+      localDecodes: 0,
+      globalDecodes: 0,
+      failedDecodes: 0,
+      invalidPositions: 0,
+      lowNicKept: 0  // NEW: Track low NIC preserved records
+    };
+    
+    setInterval(() => this.cleanup(), 30000);
+    setInterval(() => this.logStats(), 30000);
+  }
+  
+  processPositionMessage(icao, message, timestamp) {
+    const cprData = ModeS.extractCPRData(message);
+    if (!cprData) return null;
+    
+    // Get NIC value for this message
+    const nic = ModeS.nic(message);
+    
+    this.stats.positionMessages++;
+    if (cprData.format === 'even') {
+      this.stats.evenFrames++;
+    } else {
+      this.stats.oddFrames++;
+    }
+    
+    if (!this.aircraftStates.has(icao)) {
+      this.aircraftStates.set(icao, {
+        cprFrames: {},
+        lastPosition: null,
+        lastSeen: timestamp,
+        decodeAttempts: 0
+      });
+    }
+    
+    const aircraft = this.aircraftStates.get(icao);
+    aircraft.lastSeen = timestamp;
+    aircraft.decodeAttempts++;
+    
+    // Store the CPR frame
+    aircraft.cprFrames[cprData.format] = {
+      lat: cprData.lat,
+      lon: cprData.lon,
+      timestamp: cprData.timestamp
+    };
+    
+    let position = null;
+    
+    // Try local decoding first (if we have a reference position)
+    if (aircraft.lastPosition) {
+      const localPos = ModeS.cprLocalDecode(
+        aircraft.lastPosition.lat,
+        aircraft.lastPosition.lon,
+        cprData.lat,
+        cprData.lon,
+        cprData.format === 'odd'
+      );
+      
+      if (localPos && this.isValidPosition(localPos)) {
+        position = localPos;
+        position.method = 'local';
+        this.stats.localDecodes++;
+      }
+    }
+    
+    // Try global decoding if local failed and we have both frame types
+    if (!position && aircraft.cprFrames.even && aircraft.cprFrames.odd) {
+      const evenFrame = aircraft.cprFrames.even;
+      const oddFrame = aircraft.cprFrames.odd;
+      
+      // Check if frames are recent enough to pair
+      const timeDiff = Math.abs(evenFrame.timestamp - oddFrame.timestamp);
+      if (timeDiff < this.frameTimeout) {
+        const globalPos = ModeS.cprGlobalDecode(evenFrame, oddFrame);
+        
+        if (globalPos && this.isValidPosition(globalPos)) {
+          position = globalPos;
+          position.method = 'global';
+          this.stats.globalDecodes++;
+        } else {
+          this.stats.failedDecodes++;
+        }
+      }
+    }
+    
+    // Update aircraft state if we got a valid position
+    if (position) {
+      aircraft.lastPosition = {
+        lat: position.lat,
+        lon: position.lon,
+        timestamp: timestamp,
+        method: position.method
+      };
+      
+      return {
+        lat: position.lat,
+        lon: position.lon,
+        method: position.method,
+        nic: nic
+      };
+    } else {
+      // CPR FAILED - Check if we should keep this record due to low NIC
+      if (nic !== null && nic < 7) {
+        this.stats.lowNicKept++;
+        return {
+          lat: null,  // Will be converted to empty string in output
+          lon: null,  // Will be converted to empty string in output
+          method: 'low_nic_preserved',
+          nic: nic,
+          cprFailed: true
+        };
+      }
+      
+      if (aircraft.decodeAttempts > 1) {
+        this.stats.failedDecodes++;
+      }
+    }
+    
+    return null;
+  }
+  
+  isValidPosition(pos) {
+    const valid = pos && 
+           pos.lat >= -90 && pos.lat <= 90 &&
+           pos.lon >= -180 && pos.lon <= 180 &&
+           !isNaN(pos.lat) && !isNaN(pos.lon) &&
+           Math.abs(pos.lat) > 0.001 && Math.abs(pos.lon) > 0.001; // Not null island
+    
+    if (!valid) {
+      this.stats.invalidPositions++;
+    }
+    
+    return valid;
+  }
+  
+  logStats() {
+    console.log(`CPR Stats: ${this.stats.positionMessages} pos msgs | E:${this.stats.evenFrames} O:${this.stats.oddFrames} | Local:${this.stats.localDecodes} Global:${this.stats.globalDecodes} | Failed:${this.stats.failedDecodes} | LowNIC:${this.stats.lowNicKept}`);
+  }
+  
+  cleanup() {
+    const now = Date.now();
+    const timeout = 300000; // 5 minutes
+    
+    for (const [icao, aircraft] of this.aircraftStates.entries()) {
+      if (now - aircraft.lastSeen > timeout) {
+        this.aircraftStates.delete(icao);
+      } else {
+        // Clean old CPR frames
+        if (aircraft.cprFrames.even && now - aircraft.cprFrames.even.timestamp > this.frameTimeout) {
+          delete aircraft.cprFrames.even;
+        }
+        if (aircraft.cprFrames.odd && now - aircraft.cprFrames.odd.timestamp > this.frameTimeout) {
+          delete aircraft.cprFrames.odd;
+        }
+      }
+    }
+  }
+  
+  getStats() {
+    return this.stats;
+  }
+}
+
+class SimplifiedBeastProcessor {
+  constructor() {
     this.host = 'readsb-data-collector';
     this.port = 30105;
     this.aircraftDB = new Map();
+    this.cprTracker = new EnhancedCPRAircraftTracker();
     this.outputDir = './output';
     this.buffer = Buffer.alloc(0);
-    this.messagesProcessed = 0;
-    this.startTime = performance.now();
+    this.h3Resolution = 8;
+    this.startTime = Date.now();
     
     if (!fs.existsSync(this.outputDir)) {
       fs.mkdirSync(this.outputDir, { recursive: true });
     }
-    
-    this.lastStatsTime = Date.now();
-    this.lastMessageCount = 0;
   }
   
   decodeBeastMessage(data) {
-    if (data.length < 23) return null;
-    
-    if (data[0] !== 0x1A) return null;
+    if (data.length < 23 || data[0] !== 0x1A) return null;
     
     const msgType = data[1];
     const timestampBytes = data.slice(2, 8);
-    const signalLevel = data[8];
     
     let timestamp = 0;
     for (let i = 0; i < 6; i++) {
       timestamp = (timestamp << 8) | timestampBytes[i];
     }
+    
     const timestampMs = timestamp / 12000.0;
+    const utcTimestamp = new Date(this.startTime + timestampMs).toISOString();
     
     let message;
     if (msgType === 0x33) {
@@ -180,68 +388,70 @@ class BeastProcessor {
     }
     
     return {
-      type: msgType === 0x33 ? 'MODE_S_LONG' : 'MODE_S_SHORT',
-      timestamp: timestampMs,
-      signal: signalLevel,
+      timestamp: utcTimestamp,
       message: message
     };
   }
   
-  decodeModeSFields(message) {
-    try {
-      const icao = ModeS.icao(message);
-      const typecode = ModeS.typecode(message);
+  decodeModeSFields(message, utcTimestamp) {
+    const icao = ModeS.icao(message);
+    const typecode = ModeS.typecode(message);
+    
+    if (!icao) return null;
+    
+    // Fixed CRC check
+    const crcValid = ModeS.crc24(message) === 0;
+    if (!crcValid) return null;
+    
+    const fields = {
+      hex: icao,
+      beast_timestamp: utcTimestamp
+    };
+    
+    // Position messages (TC 9-18)
+    if (typecode >= 9 && typecode <= 18) {
+      const nic = ModeS.nic(message);
+      if (nic !== null) fields.nic = nic;
       
-      if (!icao) return null;
-      
-      const fields = {
-        hex: icao,
-        typecode: typecode,
-        crc_valid: ModeS.crc24(message) === 0
-      };
-      
-      // Position messages (TC 9-18)
-      if (typecode >= 9 && typecode <= 18) {
-        const alt = ModeS.altitude(message);
-        if (alt !== null) {
-          fields.altitude = alt;
+      const position = this.cprTracker.processPositionMessage(icao, message, Date.now());
+      if (position) {
+        if (position.cprFailed) {
+          // CPR failed but NIC < 7, preserve with empty strings
+          fields.lat = "";      // Empty string instead of null
+          fields.lon = "";      // Empty string instead of null
+          fields.hexagon_id = ""; // Empty string instead of null
+        } else {
+          // Normal successful position decode
+          fields.lat = position.lat;
+          fields.lon = position.lon;
+          
+          // Generate H3 hexagon ID only for valid positions
+          try {
+            const h3Index = latLngToCell(position.lat, position.lon, this.h3Resolution);
+            fields.hexagon_id = h3Index;
+          } catch (error) {
+            // Skip H3 generation for invalid coordinates
+          }
         }
-        fields.nic = ModeS.nic(message);
-        fields.surveillance_status = (message[4] >>> 1) & 0x03;
-        fields.single_antenna = (message[4] & 0x01) !== 0;
       }
-      
-      // Velocity messages (TC 19)
-      if (typecode === 19) {
-        const vel = ModeS.velocity(message);
-        if (vel) {
-          fields.gs = vel.speed;
-          fields.track = vel.heading;
-        }
-      }
-      
-      // Aircraft identification (TC 1-4)
-      if (typecode >= 1 && typecode <= 4) {
-        const callsign = ModeS.callsign(message);
-        if (callsign) {
-          fields.flight = callsign;
-          fields.category = typecode;
-        }
-      }
-      
-      return fields;
-      
-    } catch (error) {
-      return null;
     }
+    
+    // Aircraft identification (TC 1-4)
+    if (typecode >= 1 && typecode <= 4) {
+      const callsign = ModeS.callsign(message);
+      if (callsign) {
+        fields.flight = callsign;
+      }
+    }
+    
+    return fields;
   }
   
   processBeastStream() {
     const client = new net.Socket();
     
     client.connect(this.port, this.host, () => {
-      console.log(`Connected to Beast stream at ${this.host}:${this.port}`);
-      console.log(`Processing ADSBExchange global feed data...`);
+      console.log(`Connected to Beast stream - Enhanced CPR with low NIC preservation`);
     });
     
     client.on('data', (data) => {
@@ -250,12 +460,10 @@ class BeastProcessor {
     });
     
     client.on('close', () => {
-      console.log('Beast connection closed, reconnecting...');
       setTimeout(() => this.processBeastStream(), 5000);
     });
     
     client.on('error', (err) => {
-      console.error('Beast connection error:', err.message);
       setTimeout(() => this.processBeastStream(), 5000);
     });
   }
@@ -275,12 +483,8 @@ class BeastProcessor {
       if (this.buffer.length < 2) break;
       
       const msgType = this.buffer[1];
-      let msgLen;
-      if (msgType === 0x33) {
-        msgLen = 23;
-      } else if (msgType === 0x32) {
-        msgLen = 16;
-      } else {
+      let msgLen = msgType === 0x33 ? 23 : msgType === 0x32 ? 16 : 0;
+      if (!msgLen) {
         this.buffer = this.buffer.slice(1);
         continue;
       }
@@ -289,90 +493,83 @@ class BeastProcessor {
       
       const beastMsg = this.decodeBeastMessage(this.buffer.slice(0, msgLen));
       if (beastMsg) {
-        const fields = this.decodeModeSFields(beastMsg.message);
-        if (fields && fields.hex) {
-          this.updateAircraftDB(fields, beastMsg);
-          this.messagesProcessed++;
+        const fields = this.decodeModeSFields(beastMsg.message, beastMsg.timestamp);
+        if (fields) {
+          this.updateAircraftDB(fields);
         }
       }
       
       this.buffer = this.buffer.slice(msgLen);
     }
-    
-    // Performance stats every 10 seconds
-    const now = Date.now();
-    if (now - this.lastStatsTime > 10000) {
-      const msgRate = (this.messagesProcessed - this.lastMessageCount) / 10;
-      console.log(`Processing ${msgRate.toFixed(1)} messages/sec, ${this.aircraftDB.size} aircraft tracked (Global ADSBExchange feed)`);
-      this.lastStatsTime = now;
-      this.lastMessageCount = this.messagesProcessed;
-    }
   }
   
-  updateAircraftDB(fields, beastMsg) {
+  updateAircraftDB(fields) {
     const icao = fields.hex;
     const now = Date.now();
     
     if (!this.aircraftDB.has(icao)) {
       this.aircraftDB.set(icao, {
-        hex: icao,
-        messages: 0,
-        first_seen: now
+        hex: icao
       });
     }
     
     const aircraft = this.aircraftDB.get(icao);
-    
     Object.assign(aircraft, fields);
-    aircraft.seen = now;
-    aircraft.messages++;
-    aircraft.beast_timestamp = beastMsg.timestamp;
-    aircraft.signal_level = beastMsg.signal;
-    aircraft.rssi = beastMsg.signal - 256;
-    aircraft.message_type = beastMsg.type;
-    aircraft.raw_message = beastMsg.message.toString('hex').toUpperCase();
+    aircraft.last_seen = now;
   }
   
   generateJSONFiles() {
     setInterval(() => {
       try {
-        const timestamp = new Date();
-        const cutoff = Date.now() - 60000; // 60 seconds
+        const cutoff = Date.now() - 60000;
         
         // Clean old aircraft
         for (const [icao, aircraft] of this.aircraftDB.entries()) {
-          if (aircraft.seen < cutoff) {
+          if (aircraft.last_seen < cutoff) {
             this.aircraftDB.delete(icao);
           }
         }
         
-        const aircraftArray = Array.from(this.aircraftDB.values());
+        const aircraftArray = Array.from(this.aircraftDB.values()).map(aircraft => {
+          const simplified = {
+            hex: aircraft.hex,
+            beast_timestamp: aircraft.beast_timestamp
+          };
+          
+          if (aircraft.nic !== undefined) simplified.nic = aircraft.nic;
+          if (aircraft.flight) simplified.flight = aircraft.flight;
+          
+          // Handle position fields - preserve empty strings for low NIC aircraft
+          if (aircraft.lat !== undefined) {
+            simplified.lat = aircraft.lat; // Can be number or empty string
+          }
+          if (aircraft.lon !== undefined) {
+            simplified.lon = aircraft.lon; // Can be number or empty string
+          }
+          if (aircraft.hexagon_id !== undefined) {
+            simplified.hexagon_id = aircraft.hexagon_id; // Can be string or empty string
+          }
+          
+          return simplified;
+        });
         
         const outputData = {
-          now: timestamp.getTime() / 1000,
-          messages: this.messagesProcessed,
-          aircraft: aircraftArray,
-          enhanced_fields: true,
-          source: 'adsbexchange_global_feed',
-          data_sources: ['beast_feed_port_1365', 'mlat_feed_port_1366'],
-          performance: {
-            uptime: (performance.now() - this.startTime) / 1000,
-            aircraft_count: aircraftArray.length,
-            message_rate: this.messagesProcessed / ((performance.now() - this.startTime) / 1000)
-          }
+          timestamp: new Date().toISOString(),
+          aircraft: aircraftArray
         };
         
-        // Timestamped filename for ETL
+        const timestamp = new Date();
         const filename = `aircraft_${timestamp.toISOString().replace(/[:.]/g, '_').slice(0, -5)}.json`;
         const filepath = path.join(this.outputDir, filename);
         
         fs.writeFileSync(filepath, JSON.stringify(outputData, null, 2));
+        fs.writeFileSync(path.join(this.outputDir, 'latest.json'), JSON.stringify(outputData, null, 2));
         
-        // Latest file for real-time access
-        const latestPath = path.join(this.outputDir, 'latest.json');
-        fs.writeFileSync(latestPath, JSON.stringify(outputData, null, 2));
+        const withPos = aircraftArray.filter(a => a.lat && a.lon && a.lat !== "").length;
+        const withEmptyPos = aircraftArray.filter(a => a.lat === "" && a.lon === "").length;
+        const stats = this.cprTracker.getStats();
         
-        console.log(`Generated ${filename} with ${aircraftArray.length} aircraft (Global coverage)`);
+        console.log(`${aircraftArray.length} aircraft (${withPos} with position, ${withEmptyPos} low NIC preserved) | CPR Success Rate: ${((stats.localDecodes + stats.globalDecodes) / Math.max(stats.positionMessages, 1) * 100).toFixed(1)}%`);
         
       } catch (error) {
         console.error('JSON generation error:', error);
@@ -381,21 +578,17 @@ class BeastProcessor {
   }
   
   start() {
-    console.log('Starting Beast processor for ADSBExchange global feeds...');
     this.processBeastStream();
     this.generateJSONFiles();
   }
 }
 
-const processor = new BeastProcessor();
+const processor = new SimplifiedBeastProcessor();
+if (process.env.H3_RESOLUTION) {
+  processor.h3Resolution = parseInt(process.env.H3_RESOLUTION);
+}
+
 processor.start();
 
-process.on('SIGTERM', () => {
-  console.log('Shutting down gracefully...');
-  process.exit(0);
-});
-
-process.on('SIGINT', () => {
-  console.log('Shutting down gracefully...');
-  process.exit(0);
-});
+process.on('SIGTERM', () => process.exit(0));
+process.on('SIGINT', () => process.exit(0));
