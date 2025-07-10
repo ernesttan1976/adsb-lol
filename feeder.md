@@ -45,48 +45,110 @@ docker --version
 docker-compose --version
 ```
 
-## Step 2: USB Device Setup for RTL-SDR
+## Step 2: Important! Attach USB RTLSDR to WSL At Windows Startup
 
-### Option A: Windows 11 or Windows 10 with usbipd (Recommended)
+Instead of manually attaching the RTL-SDR every time, set up an automated startup script that will handle this automatically.
 
-**Install usbipd on Windows:**
+### Create PowerShell Script
+
+Create `attach-rtlsdr.ps1` in a convenient location (e.g., `C:\Scripts\attach-rtlsdr.ps1`):
+
 ```powershell
-# Run in PowerShell as Administrator
-winget install usbipd
+# attach-rtlsdr.ps1
+# Auto-attach RTL-SDR to WSL at startup
+
+# Wait for system to fully boot
+Start-Sleep -Seconds 30
+
+# Install usbipd if not already installed
+if (-not (Get-Command usbipd -ErrorAction SilentlyContinue)) {
+    Write-Host "Installing usbipd..."
+    winget install usbipd
+}
+
+# Wait for usbipd to be ready
+Start-Sleep -Seconds 10
+
+# List USB devices and find RTL-SDR
+$devices = usbipd list
+Write-Host "Available USB devices:"
+Write-Host $devices
+
+# Look for RTL-SDR device (common identifiers)
+$rtlsdrBusId = $null
+foreach ($line in $devices -split "`n") {
+    if ($line -match "(\d+-\d+).*(?:RTL28|RTL-SDR|DVB-T|Bulk-in)") {
+        $rtlsdrBusId = $matches[1]
+        Write-Host "Found RTL-SDR at bus ID: $rtlsdrBusId"
+        break
+    }
+}
+
+if ($rtlsdrBusId) {
+    # Bind the device
+    Write-Host "Binding RTL-SDR..."
+    usbipd bind --busid $rtlsdrBusId
+    
+    # Wait a moment
+    Start-Sleep -Seconds 5
+    
+    # Attach to WSL
+    Write-Host "Attaching RTL-SDR to WSL..."
+    usbipd attach --busid $rtlsdrBusId --wsl Ubuntu
+    
+    Write-Host "RTL-SDR attached successfully!"
+} else {
+    Write-Host "RTL-SDR device not found. Please check connection."
+}
 ```
 
-**Connect RTL-SDR to WSL:**
-```powershell
-# List USB devices (run in PowerShell as Administrator)
-usbipd list
+### Setup Windows Task Scheduler
 
-# Find your RTL-SDR device (usually shows as "Bulk-in, Interface")
-# Note the BUS ID (e.g., 2-1)
+1. **Open Task Scheduler**
+   - Press `Win + R`, type `taskschd.msc`, press Enter
+   - Or search "Task Scheduler" in Start menu
 
-# Bind the device
-usbipd bind --busid 2-1
+2. **Create Basic Task**
+   - Click "Create Basic Task" in right panel
+   - **Name**: RTL-SDR USB Attach
+   - **Description**: Auto-attach RTL-SDR to WSL at startup
+   - **Trigger**: When the computer starts
+   - **Action**: Start a program
+   - **Program**: `powershell.exe`
+   - **Arguments**: `-ExecutionPolicy Bypass -File "C:\Scripts\attach-rtlsdr.ps1"`
+   - **Check**: "Run with highest privileges"
+   - **Check**: "Run whether user is logged on or not"
 
-# Attach to WSL (replace "Ubuntu" with your WSL distro name)
-usbipd attach --busid 2-1 --wsl Ubuntu
-```
+### Install RTL-SDR Drivers in WSL
 
-**Verify in WSL:**
-```bash
-# In WSL terminal
-sudo apt install usbutils rtl-sdr librtlsdr-dev
-lsusb
-# Should show your RTL-SDR device
-```
-
-### Option B: Docker Desktop Device Passthrough
-
-If usbipd doesn't work, use Docker Desktop's device passthrough:
-
-**Install RTL-SDR drivers in WSL:**
 ```bash
 # In WSL terminal
 sudo apt update
-sudo apt install rtl-sdr librtlsdr-dev
+sudo apt install usbutils rtl-sdr librtlsdr-dev
+```
+
+### Verify Setup
+
+```bash
+# Check if RTL-SDR is detected
+lsusb
+# Should show your RTL-SDR device
+
+# Test RTL-SDR functionality
+rtl_test -t
+```
+
+### Manual Attachment (if needed)
+
+If you need to manually attach the RTL-SDR:
+
+```powershell
+# Run in PowerShell as Administrator
+usbipd list
+# Find your RTL-SDR device and note the BUS ID (e.g., 2-1)
+
+usbipd bind --busid 2-1
+usbipd attach --busid 2-1 --wsl Ubuntu
 ```
 
 ## Step 3: ADSB.lol Feeder Installation
@@ -310,13 +372,33 @@ docker-compose restart
 # In WSL, check USB devices
 lsusb
 
-# If device not visible, reconnect via usbipd (Windows PowerShell as Admin):
-# usbipd detach --busid 2-1
-# usbipd attach --wsl --busid 2-1 --distribution Ubuntu
-
 # Check Docker device access
 docker exec adsb-ultrafeeder lsusb
 ```
+
+**If RTL-SDR is not detected:**
+1. **Check startup script**: Ensure the PowerShell startup script ran successfully
+   - Check Windows Event Viewer for Task Scheduler logs
+   - Manually run the script: `powershell -ExecutionPolicy Bypass -File "C:\Scripts\attach-rtlsdr.ps1"`
+
+2. **Manual reattachment** (PowerShell as Admin):
+   ```powershell
+   # Detach if already attached
+   usbipd detach --busid 2-1
+   
+   # List devices to find the correct bus ID
+   usbipd list
+   
+   # Reattach (replace 2-1 with your actual bus ID)
+   usbipd bind --busid 2-1
+   usbipd attach --busid 2-1 --wsl Ubuntu
+   ```
+
+3. **Restart WSL if needed**:
+   ```powershell
+   wsl --shutdown
+   wsl
+   ```
 
 ### Permission Issues
 ```bash
@@ -327,6 +409,12 @@ newgrp docker
 # Fix USB permissions
 sudo usermod -aG dialout $USER
 ```
+
+**Task Scheduler Permission Issues:**
+If the startup script fails to run:
+1. Ensure Task Scheduler task is set to "Run with highest privileges"
+2. Set task to "Run whether user is logged on or not"
+3. Use SYSTEM account or ensure your user account has admin privileges
 
 ### WSL Memory Issues
 ```bash
