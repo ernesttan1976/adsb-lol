@@ -53,10 +53,13 @@ services:
         condition: service_healthy  # Wait for readsb to be healthy
     restart: unless-stopped
     
+    env_file:
+      - ./beast-processor/.env
+    
     environment:
       - TZ=Asia/Singapore
       - NODE_ENV=production
-      - H3_RESOLUTION=8
+      - H3_RESOLUTION=3
     
     volumes:
       - ./beast-processor:/app
