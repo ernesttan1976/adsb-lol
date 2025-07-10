@@ -2,7 +2,7 @@ version: '3.8'
 
 services:
   readsb-data-collector:
-    image: ghcr.io/sdr-enthusiasts/docker-readsb-protobuf:latest
+    build: ./custom-readsb
     container_name: readsb-data-collector
     hostname: readsb-data-collector
     restart: unless-stopped
@@ -10,80 +10,38 @@ services:
     deploy:
       resources:
         limits:
-          cpus: '1.5'
-          memory: 2G
+          memory: 2G  # 1M entries needs less memory than 16M
         reservations:
-          cpus: '0.5'
           memory: 512M
     
     environment:
       - TZ=Asia/Singapore
       - READSB_DEVICE_TYPE=none
       - READSB_NET_ONLY=true
-      - LOGLEVEL=error  # Reduce logging overhead
-      
-      # Connect to ADSBExchange Beast feed
       - READSB_NET_CONNECTOR=out.adsb.lol,1365,beast_in
-      
-      # Location
       - READSB_LAT=1.345073
       - READSB_LON=103.946810
       - READSB_MAX_RANGE=999999
-      
-      # Network ports
       - READSB_NET_BEAST_OUTPUT_PORT=30105
       - READSB_NET_BEAST_INPUT_PORT=30104
-      
-      # JSON output (optimized)
-      - READSB_WRITE_JSON_EVERY=10  # Less frequent JSON writes to reduce I/O
-      - READSB_JSON_LOCATION_ACCURACY=1  # Reduced accuracy to save processing
-      
-      # PERFORMANCE OPTIMIZATIONS FOR LIMITED HASH TABLE
-      - READSB_STATS_EVERY=30  # More frequent stats to monitor performance
-      - READSB_NET_HEARTBEAT=15  # Faster heartbeat to detect disconnections
-      - READSB_QUIET=true  # Reduce output for performance
-      
-      # CRITICAL: Reduce aircraft tracking time to free hash table slots
-      - READSB_INTERACTIVE_TTL=90  # Expire aircraft after 90 seconds (was 60)
-      
-      # Increase network buffer for better throughput
-      - READSB_NET_BUFFER=8  # 64KB * 2^8 = 16MB buffer (was 2^2 = 256KB)
-      
-      # Optimize network settings
-      - READSB_NET_CONNECTOR_DELAY=5  # Faster reconnection
-      - READSB_NET_RO_INTERVAL=0.1  # Faster output flushing
-      - READSB_NET_RO_SIZE=2400  # Larger flush size (double default)
-      
-      # Disable unused features to save memory
-      - READSB_NET_SBS_IN_PORT=0  # Disable SBS input
-      - READSB_NET_RAW_IN_PORT=0  # Disable raw input  
-      - READSB_NET_VRS_PORT=0     # Disable VRS output
-      - READSB_FORWARD_MLAT=false # Disable MLAT forwarding
-      
-      # Disable web components
-      - DISABLE_WEBAPP=true
-      - TAR1090_DISABLE=true
+      - READSB_WRITE_JSON_EVERY=5
+      - READSB_JSON_LOCATION_ACCURACY=2
+      - READSB_STATS_EVERY=60
+      - READSB_NET_HEARTBEAT=30
+      - READSB_INTERACTIVE_TTL=180
+      - READSB_QUIET=false
     
     volumes:
-      - readsb_data:/var/run/readsb
       - ./json_output:/run/readsb
     
     networks:
       - adsb_network
-    
-    healthcheck:
-      test: ["CMD-SHELL", "nc -z localhost 30105 || exit 1"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 60s
 
   beast-json-processor:
     image: node:18-alpine
     container_name: beast-json-processor
     depends_on:
-      readsb-data-collector:
-        condition: service_healthy
+      - readsb-data-collector
     restart: unless-stopped
     
     environment:
@@ -101,20 +59,7 @@ services:
     
     networks:
       - adsb_network
-    
-    # Add resource limits for beast processor too
-    deploy:
-      resources:
-        limits:
-          cpus: '1.0'
-          memory: 1G
-        reservations:
-          cpus: '0.25'
-          memory: 256M
 
 networks:
   adsb_network:
     driver: bridge
-
-volumes:
-  readsb_data:
