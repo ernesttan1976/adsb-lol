@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Build readsb command line from environment variables
-ARGS=""
+ARGS="--net"  # CRITICAL: Enable networking
 
 # Basic settings
 if [ -n "$READSB_DEVICE_TYPE" ]; then

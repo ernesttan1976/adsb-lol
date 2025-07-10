@@ -10,7 +10,7 @@ services:
     deploy:
       resources:
         limits:
-          memory: 2G  # 1M entries needs less memory than 16M
+          memory: 2G
         reservations:
           memory: 512M
     
@@ -36,12 +36,21 @@ services:
     
     networks:
       - adsb_network
+    
+    # Health check to ensure port 30105 is listening
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z localhost 30105 || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
 
   beast-json-processor:
     image: node:18-alpine
     container_name: beast-json-processor
     depends_on:
-      - readsb-data-collector
+      readsb-data-collector:
+        condition: service_healthy  # Wait for readsb to be healthy
     restart: unless-stopped
     
     environment:
