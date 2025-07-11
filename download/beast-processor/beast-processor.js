@@ -9,6 +9,46 @@ const { performance } = require('perf_hooks');
 const { latLngToCell } = require('h3-js');
 const { S3Client, PutObjectCommand } = require('@aws-sdk/client-s3');
 
+function cleanupOldFiles() {
+    const enhancedJsonDir = path.join(__dirname, 'enhanced_json');
+    const oneHourAgo = Date.now() - (60 * 60 * 1000); // 1 hour in milliseconds
+    
+    try {
+        // Check if directory exists
+        if (!fs.existsSync(enhancedJsonDir)) {
+            console.log('Enhanced JSON directory does not exist, skipping cleanup');
+            return;
+        }
+        
+        // Read all files in the directory
+        const files = fs.readdirSync(enhancedJsonDir);
+        let deletedCount = 0;
+        
+        files.forEach(file => {
+            const filePath = path.join(enhancedJsonDir, file);
+            
+            try {
+                const stats = fs.statSync(filePath);
+                
+                // Check if file is older than 1 hour
+                if (stats.mtime.getTime() < oneHourAgo) {
+                    fs.unlinkSync(filePath);
+                    deletedCount++;
+                    console.log(`Deleted old file: ${file}`);
+                }
+            } catch (err) {
+                console.error(`Error processing file ${file}:`, err.message);
+            }
+        });
+        
+        console.log(`Cleanup completed. Deleted ${deletedCount} old files from enhanced_json folder.`);
+        
+    } catch (err) {
+        console.error('Error during cleanup:', err.message);
+    }
+}
+
+
 // Mode S decoder with CPR position decoding
 class ModeS {
   static crc24(data) {
@@ -392,7 +432,6 @@ class S3Uploader {
       }
       
       const fileContent = fs.readFileSync(localPath);
-      console.log(`Attempting S3 upload: ${s3Key} (${fileContent.length} bytes)`);
       
       const command = new PutObjectCommand({
         Bucket: this.bucket,
@@ -625,6 +664,13 @@ constructor() {
     Object.assign(aircraft, fields);
     aircraft.last_seen = now;
   }
+
+// Most concise approach
+roundToNearest5Seconds(timestamp) {
+  const d = new Date(timestamp);
+  d.setSeconds(Math.floor(d.getSeconds() / 5) * 5, 0);
+  return d;
+};
   
 generateJSONFiles() {
   setInterval(async () => {
@@ -661,12 +707,13 @@ generateJSONFiles() {
         return simplified;
       });
       
+      const timestamp = this.roundToNearest5Seconds(new Date());
+
       const outputData = {
-        timestamp: new Date().toISOString(),
+        timestamp: timestamp.toISOString(),
         aircraft: aircraftArray
       };
       
-      const timestamp = new Date();
       const filename = `aircraft_${timestamp.toISOString().replace(/[:.]/g, '_').slice(0, -5)}.json`;
       const filepath = path.join(this.outputDir, filename);
       const latestPath = path.join(this.outputDir, 'latest.json');
@@ -718,5 +765,21 @@ if (process.env.H3_RESOLUTION) {
 
 processor.start();
 
-process.on('SIGTERM', () => process.exit(0));
-process.on('SIGINT', () => process.exit(0));
+
+// Start the cleanup interval (every 10 minutes)
+const cleanupInterval = setInterval(cleanupOldFiles, 10 * 60 * 1000);
+
+// Optional: Run cleanup immediately on startup
+cleanupOldFiles();
+
+process.on('SIGINT', () => {
+    console.log('Shutting down...');
+    clearInterval(cleanupInterval);
+    process.exit(0);
+});
+
+process.on('SIGTERM', () => {
+    console.log('Shutting down...');
+    clearInterval(cleanupInterval);
+    process.exit(0);
+});
