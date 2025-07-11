@@ -1,10 +1,53 @@
 #!/usr/bin/env node
 
+require('dotenv').config();
+
 const net = require('net');
 const fs = require('fs');
 const path = require('path');
 const { performance } = require('perf_hooks');
 const { latLngToCell } = require('h3-js');
+const { S3Client, PutObjectCommand } = require('@aws-sdk/client-s3');
+
+function cleanupOldFiles() {
+    const enhancedJsonDir = path.join(__dirname, 'enhanced_json');
+    const oneHourAgo = Date.now() - (60 * 60 * 1000); // 1 hour in milliseconds
+    
+    try {
+        // Check if directory exists
+        if (!fs.existsSync(enhancedJsonDir)) {
+            console.log('Enhanced JSON directory does not exist, skipping cleanup');
+            return;
+        }
+        
+        // Read all files in the directory
+        const files = fs.readdirSync(enhancedJsonDir);
+        let deletedCount = 0;
+        
+        files.forEach(file => {
+            const filePath = path.join(enhancedJsonDir, file);
+            
+            try {
+                const stats = fs.statSync(filePath);
+                
+                // Check if file is older than 1 hour
+                if (stats.mtime.getTime() < oneHourAgo) {
+                    fs.unlinkSync(filePath);
+                    deletedCount++;
+                    console.log(`Deleted old file: ${file}`);
+                }
+            } catch (err) {
+                console.error(`Error processing file ${file}:`, err.message);
+            }
+        });
+        
+        console.log(`Cleanup completed. Deleted ${deletedCount} old files from enhanced_json folder.`);
+        
+    } catch (err) {
+        console.error('Error during cleanup:', err.message);
+    }
+}
+
 
 // Mode S decoder with CPR position decoding
 class ModeS {
@@ -346,21 +389,125 @@ class EnhancedCPRAircraftTracker {
   }
 }
 
-class SimplifiedBeastProcessor {
-  constructor() {
-    this.host = 'readsb-data-collector';
-    this.port = 30105;
-    this.aircraftDB = new Map();
-    this.cprTracker = new EnhancedCPRAircraftTracker();
-    this.outputDir = './output';
-    this.buffer = Buffer.alloc(0);
-    this.h3Resolution = 8;
-    this.startTime = Date.now();
+class S3Uploader {
+  constructor(config = {}) {
+    this.enabled = config.enabled || false;
+    this.bucket = config.bucket;
+    this.region = config.region || 'us-east-1';
+    this.uploadLatest = config.uploadLatest !== false; // Default true
+    this.retryAttempts = config.retryAttempts || 3;
+    this.retryDelay = config.retryDelay || 1000;
     
-    if (!fs.existsSync(this.outputDir)) {
-      fs.mkdirSync(this.outputDir, { recursive: true });
+    if (this.enabled && !this.bucket) {
+      throw new Error('S3 bucket name is required when S3 upload is enabled');
+    }
+    
+    if (this.enabled) {
+      this.s3Client = new S3Client({
+        region: this.region,
+        credentials: {
+          accessKeyId: process.env.AWS_ACCESS_KEY_ID,
+          secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY
+        }
+      });
+      
+      console.log(`S3 uploader initialized: bucket=${this.bucket}, region=${this.region}`);
+      console.log(`S3 credentials check: AccessKeyId=${process.env.AWS_ACCESS_KEY_ID ? 'SET' : 'NOT SET'}, SecretAccessKey=${process.env.AWS_SECRET_ACCESS_KEY ? 'SET' : 'NOT SET'}`);
+    } else {
+      console.log('S3 uploader disabled (S3_UPLOAD_ENABLED not set to true)');
     }
   }
+  
+  async uploadFile(localPath, s3Key, contentType = 'application/json') {
+    if (!this.enabled) {
+      console.log('S3 upload skipped - S3 uploader not enabled');
+      return false;
+    }
+    
+    try {
+      // Check if file exists before attempting upload
+      if (!fs.existsSync(localPath)) {
+        console.error(`S3 upload failed for ${s3Key}: Local file does not exist: ${localPath}`);
+        return false;
+      }
+      
+      const fileContent = fs.readFileSync(localPath);
+      
+      const command = new PutObjectCommand({
+        Bucket: this.bucket,
+        Key: s3Key,
+        Body: fileContent,
+        ContentType: contentType,
+        CacheControl: 'no-cache, max-age=0'
+      });
+      
+      const result = await this.s3Client.send(command);
+      console.log(`S3 upload successful: ${s3Key}`);
+      return true;
+    } catch (error) {
+      console.error(`S3 upload failed for ${s3Key}:`, error.message);
+      if (error.name === 'CredentialsProviderError') {
+        console.error('AWS credentials not found. Check AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY environment variables.');
+      }
+      return false;
+    }
+  }
+  
+  async uploadWithRetry(localPath, s3Key, contentType = 'application/json') {
+    if (!this.enabled) return false;
+    
+    for (let attempt = 1; attempt <= this.retryAttempts; attempt++) {
+      const success = await this.uploadFile(localPath, s3Key, contentType);
+      if (success) {
+        return true;
+      }
+      
+      if (attempt < this.retryAttempts) {
+        console.log(`S3 upload attempt ${attempt} failed for ${s3Key}, retrying in ${this.retryDelay}ms...`);
+        await new Promise(resolve => setTimeout(resolve, this.retryDelay));
+      }
+    }
+    
+    console.error(`S3 upload failed for ${s3Key} after ${this.retryAttempts} attempts`);
+    return false;
+  }
+  
+  generateS3Key(filename) {
+    const timestamp = new Date();
+    const year = timestamp.getUTCFullYear();
+    const month = String(timestamp.getUTCMonth() + 1).padStart(2, '0');
+    const day = String(timestamp.getUTCDate()).padStart(2, '0');
+    const hour = String(timestamp.getUTCHours()).padStart(2, '0');
+    
+    return `${year}/${month}/${day}/${hour}/${filename}`;
+  }
+}
+
+class SimplifiedBeastProcessor {
+constructor() {
+  this.host = 'readsb-data-collector';
+  this.port = 30105;
+  this.aircraftDB = new Map();
+  this.cprTracker = new EnhancedCPRAircraftTracker();
+  this.outputDir = './output';
+  this.buffer = Buffer.alloc(0);
+  this.h3Resolution = 8;
+  this.startTime = Date.now();
+  
+  // Initialize S3 uploader
+  this.s3Uploader = new S3Uploader({
+    enabled: process.env.S3_UPLOAD_ENABLED === 'true',
+    bucket: process.env.S3_BUCKET,
+    region: process.env.S3_REGION || 'ap-southeast-1',
+    uploadLatest: process.env.S3_UPLOAD_LATEST !== 'false',
+    retryAttempts: parseInt(process.env.S3_RETRY_ATTEMPTS) || 3,
+    retryDelay: parseInt(process.env.S3_RETRY_DELAY) || 1000
+  });
+  
+  if (!fs.existsSync(this.outputDir)) {
+    fs.mkdirSync(this.outputDir, { recursive: true });
+  }
+}
   
   decodeBeastMessage(data) {
     if (data.length < 23 || data[0] !== 0x1A) return null;
@@ -405,7 +552,7 @@ class SimplifiedBeastProcessor {
     
     const fields = {
       hex: icao,
-      beast_timestamp: utcTimestamp
+      timestamp: utcTimestamp
     };
     
     // Position messages (TC 9-18)
@@ -517,65 +664,92 @@ class SimplifiedBeastProcessor {
     Object.assign(aircraft, fields);
     aircraft.last_seen = now;
   }
+
+// Most concise approach
+roundToNearest5Seconds(timestamp) {
+  const d = new Date(timestamp);
+  d.setSeconds(Math.floor(d.getSeconds() / 5) * 5, 0);
+  return d;
+};
   
-  generateJSONFiles() {
-    setInterval(() => {
-      try {
-        const cutoff = Date.now() - 60000;
-        
-        // Clean old aircraft
-        for (const [icao, aircraft] of this.aircraftDB.entries()) {
-          if (aircraft.last_seen < cutoff) {
-            this.aircraftDB.delete(icao);
-          }
+generateJSONFiles() {
+  setInterval(async () => {
+    try {
+      const cutoff = Date.now() - 60000;
+      
+      // Clean old aircraft
+      for (const [icao, aircraft] of this.aircraftDB.entries()) {
+        if (aircraft.last_seen < cutoff) {
+          this.aircraftDB.delete(icao);
         }
-        
-        const aircraftArray = Array.from(this.aircraftDB.values()).map(aircraft => {
-          const simplified = {
-            hex: aircraft.hex,
-            beast_timestamp: aircraft.beast_timestamp
-          };
-          
-          if (aircraft.nic !== undefined) simplified.nic = aircraft.nic;
-          if (aircraft.flight) simplified.flight = aircraft.flight;
-          
-          // Handle position fields - preserve empty strings for low NIC aircraft
-          if (aircraft.lat !== undefined) {
-            simplified.lat = aircraft.lat; // Can be number or empty string
-          }
-          if (aircraft.lon !== undefined) {
-            simplified.lon = aircraft.lon; // Can be number or empty string
-          }
-          if (aircraft.hexagon_id !== undefined) {
-            simplified.hexagon_id = aircraft.hexagon_id; // Can be string or empty string
-          }
-          
-          return simplified;
-        });
-        
-        const outputData = {
-          timestamp: new Date().toISOString(),
-          aircraft: aircraftArray
+      }
+      
+      const aircraftArray = Array.from(this.aircraftDB.values()).map(aircraft => {
+        const simplified = {
+          hex: aircraft.hex,
+          beast_timestamp: aircraft.beast_timestamp
         };
         
-        const timestamp = new Date();
-        const filename = `aircraft_${timestamp.toISOString().replace(/[:.]/g, '_').slice(0, -5)}.json`;
-        const filepath = path.join(this.outputDir, filename);
+        if (aircraft.nic !== undefined) simplified.nic = aircraft.nic;
+        if (aircraft.flight) simplified.flight = aircraft.flight;
         
-        fs.writeFileSync(filepath, JSON.stringify(outputData, null, 2));
-        fs.writeFileSync(path.join(this.outputDir, 'latest.json'), JSON.stringify(outputData, null, 2));
+        // Handle position fields - preserve empty strings for low NIC aircraft
+        if (aircraft.lat !== undefined) {
+          simplified.lat = aircraft.lat; // Can be number or empty string
+        }
+        if (aircraft.lon !== undefined) {
+          simplified.lon = aircraft.lon; // Can be number or empty string
+        }
+        if (aircraft.hexagon_id !== undefined) {
+          simplified.hexagon_id = aircraft.hexagon_id; // Can be string or empty string
+        }
         
-        const withPos = aircraftArray.filter(a => a.lat && a.lon && a.lat !== "").length;
-        const withEmptyPos = aircraftArray.filter(a => a.lat === "" && a.lon === "").length;
-        const stats = this.cprTracker.getStats();
+        return simplified;
+      });
+      
+      const timestamp = this.roundToNearest5Seconds(new Date());
+
+      const outputData = {
+        timestamp: timestamp.toISOString(),
+        aircraft: aircraftArray
+      };
+      
+      const filename = `aircraft_${timestamp.toISOString().replace(/[:.]/g, '_').slice(0, -5)}.json`;
+      const filepath = path.join(this.outputDir, filename);
+      const latestPath = path.join(this.outputDir, 'latest.json');
+      
+      // Write files locally
+      fs.writeFileSync(filepath, JSON.stringify(outputData, null, 2));
+      fs.writeFileSync(latestPath, JSON.stringify(outputData, null, 2));
+      
+      // Upload to S3 if enabled
+      if (this.s3Uploader.enabled) {
+        // Upload timestamped file
+        const s3Key = this.s3Uploader.generateS3Key(filename);
+        this.s3Uploader.uploadWithRetry(filepath, s3Key).catch(error => {
+          console.error(`Background S3 upload failed for ${filename}:`, error);
+        });
         
-        console.log(`${aircraftArray.length} aircraft (${withPos} with position, ${withEmptyPos} low NIC preserved) | CPR Success Rate: ${((stats.localDecodes + stats.globalDecodes) / Math.max(stats.positionMessages, 1) * 100).toFixed(1)}%`);
-        
-      } catch (error) {
-        console.error('JSON generation error:', error);
+        // Upload latest file if configured (disabled)
+        // if (this.s3Uploader.uploadLatest) {
+        //   this.s3Uploader.uploadWithRetry(latestPath, 'latest.json').catch(error => {
+        //     console.error(`Background S3 upload failed for latest.json:`, error);
+        //   });
+        // }
       }
-    }, 5000);
-  }
+      
+      const withPos = aircraftArray.filter(a => a.lat && a.lon && a.lat !== "").length;
+      const withEmptyPos = aircraftArray.filter(a => a.lat === "" && a.lon === "").length;
+      const stats = this.cprTracker.getStats();
+      
+      const s3Status = this.s3Uploader.enabled ? ' | S3: enabled' : '';
+      console.log(`${aircraftArray.length} aircraft (${withPos} with position, ${withEmptyPos} low NIC preserved) | CPR Success Rate: ${((stats.localDecodes + stats.globalDecodes) / Math.max(stats.positionMessages, 1) * 100).toFixed(1)}%${s3Status}`);
+      
+    } catch (error) {
+      console.error('JSON generation error:', error);
+    }
+  }, 5000);
+}
   
   start() {
     this.processBeastStream();
@@ -584,11 +758,28 @@ class SimplifiedBeastProcessor {
 }
 
 const processor = new SimplifiedBeastProcessor();
+
 if (process.env.H3_RESOLUTION) {
   processor.h3Resolution = parseInt(process.env.H3_RESOLUTION);
 }
 
 processor.start();
 
-process.on('SIGTERM', () => process.exit(0));
-process.on('SIGINT', () => process.exit(0));
+
+// Start the cleanup interval (every 10 minutes)
+const cleanupInterval = setInterval(cleanupOldFiles, 10 * 60 * 1000);
+
+// Optional: Run cleanup immediately on startup
+cleanupOldFiles();
+
+process.on('SIGINT', () => {
+    console.log('Shutting down...');
+    clearInterval(cleanupInterval);
+    process.exit(0);
+});
+
+process.on('SIGTERM', () => {
+    console.log('Shutting down...');
+    clearInterval(cleanupInterval);
+    process.exit(0);
+});
