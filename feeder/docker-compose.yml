@@ -51,6 +51,7 @@ services:
       
       # Statistics reporting
       - READSB_STATS_EVERY=60
+      - DISABLE_COLLECTD_TABLE=true
 
     volumes:
       - ./adsb_data:/opt/adsb
