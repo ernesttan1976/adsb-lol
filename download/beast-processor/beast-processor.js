@@ -10,7 +10,7 @@ const { latLngToCell } = require('h3-js');
 const { S3Client, PutObjectCommand } = require('@aws-sdk/client-s3');
 
 function cleanupOldFiles() {
-    const enhancedJsonDir = path.join(__dirname, 'enhanced_json');
+    const enhancedJsonDir = path.join(__dirname, 'output');
     const oneHourAgo = Date.now() - (60 * 60 * 1000); // 1 hour in milliseconds
     
     try {
@@ -34,7 +34,6 @@ function cleanupOldFiles() {
                 if (stats.mtime.getTime() < oneHourAgo) {
                     fs.unlinkSync(filePath);
                     deletedCount++;
-                    console.log(`Deleted old file: ${file}`);
                 }
             } catch (err) {
                 console.error(`Error processing file ${file}:`, err.message);
@@ -99,6 +98,50 @@ class ModeS {
     }
     
     return callsign.trim();
+  }
+  
+  static altitude(msg) {
+    const tc = this.typecode(msg);
+    if (tc < 9 || tc > 18) return null;
+    
+    const alt_code = ((msg[5] & 0xFF) << 4) | ((msg[6] & 0xF0) >> 4);
+    if (alt_code === 0) return null;
+    
+    const altitude = alt_code * 25 - 1000;
+    return altitude;
+  }
+  
+  static velocity(msg) {
+    const tc = this.typecode(msg);
+    if (tc !== 19) return null;
+    
+    const st = (msg[4] & 0x07);
+    if (st !== 1 && st !== 2) return null; // Only ground speed
+    
+    const ew_dir = (msg[5] & 0x04) !== 0;
+    const ew_vel = ((msg[5] & 0x03) << 8) | msg[6];
+    const ns_dir = (msg[7] & 0x80) !== 0;
+    const ns_vel = ((msg[7] & 0x7F) << 3) | ((msg[8] & 0xE0) >> 5);
+    
+    if (ew_vel === 0 || ns_vel === 0) return null;
+    
+    const ew_speed = (ew_vel - 1) * (ew_dir ? -1 : 1);
+    const ns_speed = (ns_vel - 1) * (ns_dir ? -1 : 1);
+    
+    const ground_speed = Math.sqrt(ew_speed * ew_speed + ns_speed * ns_speed);
+    let track = Math.atan2(ew_speed, ns_speed) * 180 / Math.PI;
+    if (track < 0) track += 360;
+    
+    // Vertical rate
+    const vr_sign = (msg[8] & 0x08) !== 0;
+    const vr_val = ((msg[8] & 0x07) << 6) | ((msg[9] & 0xFC) >> 2);
+    const vertical_rate = vr_val === 0 ? null : (vr_val - 1) * 64 * (vr_sign ? -1 : 1);
+    
+    return {
+      ground_speed: Math.round(ground_speed),
+      track: Math.round(track * 10) / 10,
+      vertical_rate: vertical_rate
+    };
   }
   
   static nic(msg) {
@@ -536,11 +579,12 @@ constructor() {
     
     return {
       timestamp: utcTimestamp,
-      message: message
+      message: message,
+      msgType: msgType
     };
   }
   
-  decodeModeSFields(message, utcTimestamp) {
+  decodeModeSFields(message, utcTimestamp, msgType) {
     const icao = ModeS.icao(message);
     const typecode = ModeS.typecode(message);
     
@@ -560,26 +604,32 @@ constructor() {
       const nic = ModeS.nic(message);
       if (nic !== null) fields.nic = nic;
       
+      // Extract altitude
+      const altitude = ModeS.altitude(message);
+      if (altitude !== null) fields.altitude = altitude;
+      
       const position = this.cprTracker.processPositionMessage(icao, message, Date.now());
       if (position) {
         if (position.cprFailed) {
           // CPR failed but NIC < 7, preserve with empty strings
           fields.lat = "";      // Empty string instead of null
           fields.lon = "";      // Empty string instead of null
-          fields.hexagon_id = ""; // Empty string instead of null
         } else {
           // Normal successful position decode
           fields.lat = position.lat;
           fields.lon = position.lon;
           
-          // Generate H3 hexagon ID only for valid positions
-          try {
-            const h3Index = latLngToCell(position.lat, position.lon, this.h3Resolution);
-            fields.hexagon_id = h3Index;
-          } catch (error) {
-            // Skip H3 generation for invalid coordinates
-          }
         }
+      }
+    }
+    
+    // Velocity messages (TC 19)
+    if (typecode === 19) {
+      const velocity = ModeS.velocity(message);
+      if (velocity) {
+        if (velocity.ground_speed !== null) fields.ground_speed = velocity.ground_speed;
+        if (velocity.track !== null) fields.track = velocity.track;
+        if (velocity.vertical_rate !== null) fields.vertical_rate = velocity.vertical_rate;
       }
     }
     
@@ -640,7 +690,7 @@ constructor() {
       
       const beastMsg = this.decodeBeastMessage(this.buffer.slice(0, msgLen));
       if (beastMsg) {
-        const fields = this.decodeModeSFields(beastMsg.message, beastMsg.timestamp);
+        const fields = this.decodeModeSFields(beastMsg.message, beastMsg.timestamp, beastMsg.msgType);
         if (fields) {
           this.updateAircraftDB(fields);
         }
@@ -687,22 +737,18 @@ generateJSONFiles() {
       const aircraftArray = Array.from(this.aircraftDB.values()).map(aircraft => {
         const simplified = {
           hex: aircraft.hex,
-          beast_timestamp: aircraft.beast_timestamp
         };
         
-        if (aircraft.nic !== undefined) simplified.nic = aircraft.nic;
-        if (aircraft.flight) simplified.flight = aircraft.flight;
+        simplified.nic = aircraft?.nic || 0;
+        simplified.flight = aircraft?.flight || "";
         
-        // Handle position fields - preserve empty strings for low NIC aircraft
-        if (aircraft.lat !== undefined) {
-          simplified.lat = aircraft.lat; // Can be number or empty string
-        }
-        if (aircraft.lon !== undefined) {
-          simplified.lon = aircraft.lon; // Can be number or empty string
-        }
-        if (aircraft.hexagon_id !== undefined) {
-          simplified.hexagon_id = aircraft.hexagon_id; // Can be string or empty string
-        }
+        simplified.lat = aircraft?.lat || ""; // Can be number or empty string
+        simplified.lon = aircraft?.lon || ""; // Can be number or empty string
+        
+        simplified.altitude = aircraft?.altitude || "";
+        simplified.ground_speed = aircraft?.ground_speed || "";
+        simplified.track = aircraft?.track || "";
+        simplified.vertical_rate = aircraft?.vertical_rate || "";
         
         return simplified;
       });
@@ -710,7 +756,8 @@ generateJSONFiles() {
       const timestamp = this.roundToNearest5Seconds(new Date());
 
       const outputData = {
-        timestamp: timestamp.toISOString(),
+        now: timestamp.toISOString(),
+        messages: aircraftArray?.length || 0,
         aircraft: aircraftArray
       };
       

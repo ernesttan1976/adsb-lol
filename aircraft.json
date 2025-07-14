@@ -1,0 +1,49 @@
+{ 
+  "now" : 1748736054.001,
+  "messages" : 1156507784,
+  "aircraft" : [
+    {
+      "hex":"aa5f41",
+      "type":"adsb_icao",
+      "flight":"AAL61   ",
+      "r":"N768AA",
+      "t":"B772",
+      "alt_baro":35000,
+      "alt_geom":34000,
+      "gs":474.8,
+      "track":246.67,
+      "baro_rate":0,
+      "squawk":"2650",
+      "emergency":"none",
+      "category":"A5",
+      "nav_qnh":1012.8,
+      "nav_altitude_mcp":35008,
+      "nav_heading":236.25,
+      "lat":60.426946,
+      "lon":-172.829165,
+      "nic":8,
+      "rc":186,
+      "seen_pos":3.373,
+      "version":2,
+      "nic_baro":1,
+      "nac_p":9,
+      "nac_v":1,
+      "sil":3,
+      "sil_type":"perhour",
+      "gva":2,
+      "sda":2,
+      "alert":0,
+      "spi":0,
+      "mlat":[],
+      "tisb":[],
+      "messages":73918494,
+      "seen":1.0,
+      "rssi":-30.3
+    },
+    {},
+    {},
+    {}
+  ]}
+
+
+
