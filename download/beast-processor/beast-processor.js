@@ -100,15 +100,15 @@ class ModeS {
     return callsign.trim();
   }
   
-  static altitude(msg) {
+  static alt_baro(msg) {
     const tc = this.typecode(msg);
     if (tc < 9 || tc > 18) return null;
     
     const alt_code = ((msg[5] & 0xFF) << 4) | ((msg[6] & 0xF0) >> 4);
     if (alt_code === 0) return null;
     
-    const altitude = alt_code * 25 - 1000;
-    return altitude;
+    const alt_baro = alt_code * 25 - 1000;
+    return alt_baro;
   }
   
   static velocity(msg) {
@@ -128,7 +128,7 @@ class ModeS {
     const ew_speed = (ew_vel - 1) * (ew_dir ? -1 : 1);
     const ns_speed = (ns_vel - 1) * (ns_dir ? -1 : 1);
     
-    const ground_speed = Math.sqrt(ew_speed * ew_speed + ns_speed * ns_speed);
+    const gs = Math.sqrt(ew_speed * ew_speed + ns_speed * ns_speed);
     let track = Math.atan2(ew_speed, ns_speed) * 180 / Math.PI;
     if (track < 0) track += 360;
     
@@ -138,7 +138,7 @@ class ModeS {
     const vertical_rate = vr_val === 0 ? null : (vr_val - 1) * 64 * (vr_sign ? -1 : 1);
     
     return {
-      ground_speed: Math.round(ground_speed),
+      gs: Math.round(gs),
       track: Math.round(track * 10) / 10,
       vertical_rate: vertical_rate
     };
@@ -605,8 +605,8 @@ constructor() {
       if (nic !== null) fields.nic = nic;
       
       // Extract altitude
-      const altitude = ModeS.altitude(message);
-      if (altitude !== null) fields.altitude = altitude;
+      const alt_baro = ModeS.alt_baro(message);
+      if (alt_baro !== null) fields.alt_baro = alt_baro;
       
       const position = this.cprTracker.processPositionMessage(icao, message, Date.now());
       if (position) {
@@ -627,7 +627,7 @@ constructor() {
     if (typecode === 19) {
       const velocity = ModeS.velocity(message);
       if (velocity) {
-        if (velocity.ground_speed !== null) fields.ground_speed = velocity.ground_speed;
+        if (velocity.gs !== null) fields.gs = velocity.gs;
         if (velocity.track !== null) fields.track = velocity.track;
         if (velocity.vertical_rate !== null) fields.vertical_rate = velocity.vertical_rate;
       }
@@ -745,8 +745,8 @@ generateJSONFiles() {
         simplified.lat = aircraft?.lat || ""; // Can be number or empty string
         simplified.lon = aircraft?.lon || ""; // Can be number or empty string
         
-        simplified.altitude = aircraft?.altitude || "";
-        simplified.ground_speed = aircraft?.ground_speed || "";
+        simplified.alt_baro = aircraft?.alt_baro || "";
+        simplified.gs = aircraft?.gs || "";
         simplified.track = aircraft?.track || "";
         simplified.vertical_rate = aircraft?.vertical_rate || "";
         
