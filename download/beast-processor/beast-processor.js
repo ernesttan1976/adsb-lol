@@ -8,6 +8,7 @@ const path = require('path');
 const { performance } = require('perf_hooks');
 const { latLngToCell } = require('h3-js');
 const { S3Client, PutObjectCommand } = require('@aws-sdk/client-s3');
+const nodemailer = require('nodemailer');
 
 function cleanupOldFiles() {
     const enhancedJsonDir = path.join(__dirname, 'output');
@@ -526,6 +527,75 @@ class S3Uploader {
   }
 }
 
+class EmailNotifier {
+  constructor() {
+    this.enabled = process.env.EMAIL_USER && process.env.EMAIL_APP_PASSWORD && process.env.EMAIL_TO;
+    this.emailUser = process.env.EMAIL_USER;
+    this.emailPassword = process.env.EMAIL_APP_PASSWORD;
+    this.emailTo = process.env.EMAIL_TO;
+    this.isAlertSent = false;
+    
+    if (this.enabled) {
+      this.transporter = nodemailer.createTransport({
+        service: 'gmail',
+        auth: {
+          user: this.emailUser,
+          pass: this.emailPassword
+        }
+      });
+      console.log(`Email notifications enabled: ${this.emailUser} -> ${this.emailTo}`);
+    } else {
+      console.log('Email notifications disabled (missing EMAIL_USER, EMAIL_APP_PASSWORD, or EMAIL_TO)');
+    }
+  }
+  
+  async sendAlert(subject, message) {
+    if (!this.enabled || this.isAlertSent) return;
+    
+    try {
+      await this.transporter.sendMail({
+        from: this.emailUser,
+        to: this.emailTo,
+        subject: `ADSB Alert: ${subject}`,
+        text: message,
+        html: `<div style="font-family: Arial, sans-serif;"><h3>ADSB System Alert</h3><p><strong>${subject}</strong></p><p>${message}</p><p><em>Timestamp: ${new Date().toISOString()}</em></p></div>`
+      });
+      
+      this.isAlertSent = true;
+      console.log(`Alert email sent: ${subject}`);
+    } catch (error) {
+      console.error('Failed to send email alert:', error.message);
+    }
+  }
+  
+  async sendRecovery(subject, message) {
+    if (!this.enabled) {
+      console.log('Email recovery skipped - notifications disabled');
+      return;
+    }
+    
+    if (!this.isAlertSent) {
+      console.log('Email recovery skipped - no previous alert was sent');
+      return;
+    }
+    
+    try {
+      await this.transporter.sendMail({
+        from: this.emailUser,
+        to: this.emailTo,
+        subject: `ADSB Recovery: ${subject}`,
+        text: message,
+        html: `<div style="font-family: Arial, sans-serif;"><h3>ADSB System Recovery</h3><p><strong>${subject}</strong></p><p>${message}</p><p><em>Timestamp: ${new Date().toISOString()}</em></p></div>`
+      });
+      
+      this.isAlertSent = false; // Reset alert status after successful recovery email
+      console.log(`Recovery email sent: ${subject}`);
+    } catch (error) {
+      console.error('Failed to send recovery email:', error.message);
+    }
+  }
+}
+
 class SimplifiedBeastProcessor {
 constructor() {
   this.host = 'readsb-data-collector';
@@ -536,6 +606,11 @@ constructor() {
   this.buffer = Buffer.alloc(0);
   this.h3Resolution = 8;
   this.startTime = Date.now();
+  
+  // Data monitoring for email alerts
+  this.lastDataReceived = Date.now();
+  this.emailNotifier = new EmailNotifier();
+  this.dataTimeoutMs = 60000; // 1 minute
   
   // Initialize S3 uploader
   this.s3Uploader = new S3Uploader({
@@ -550,6 +625,9 @@ constructor() {
   if (!fs.existsSync(this.outputDir)) {
     fs.mkdirSync(this.outputDir, { recursive: true });
   }
+  
+  // Start monitoring for data timeout
+  this.startDataMonitoring();
 }
   
   decodeBeastMessage(data) {
@@ -704,6 +782,9 @@ constructor() {
     const icao = fields.hex;
     const now = Date.now();
     
+    // Update last data received timestamp
+    this.lastDataReceived = now;
+    
     if (!this.aircraftDB.has(icao)) {
       this.aircraftDB.set(icao, {
         hex: icao
@@ -713,6 +794,35 @@ constructor() {
     const aircraft = this.aircraftDB.get(icao);
     Object.assign(aircraft, fields);
     aircraft.last_seen = now;
+  }
+  
+  startDataMonitoring() {
+    console.log('Starting data monitoring - will alert if no data for 60 seconds');
+    
+    setInterval(async () => {
+      const now = Date.now();
+      const timeSinceLastData = now - this.lastDataReceived;
+      
+      if (timeSinceLastData > this.dataTimeoutMs) {
+        // No data for more than 1 minute
+        if (!this.emailNotifier.isAlertSent) {
+          console.log(`No data for ${Math.round(timeSinceLastData / 1000)}s - sending alert email`);
+          await this.emailNotifier.sendAlert(
+            'No Data Received',
+            `ADSB beast processor has not received any data for ${Math.round(timeSinceLastData / 1000)} seconds. Last data received at ${new Date(this.lastDataReceived).toISOString()}.`
+          );
+        }
+      } else {
+        // Data is flowing normally - send recovery if we previously sent an alert
+        if (this.emailNotifier.isAlertSent) {
+          console.log(`Data flow restored (${Math.round(timeSinceLastData / 1000)}s since last data) - sending recovery email`);
+          await this.emailNotifier.sendRecovery(
+            'Data Flow Restored',
+            `ADSB beast processor has resumed receiving data. System recovered and data flow is now normal. Most recent data received ${Math.round(timeSinceLastData / 1000)} seconds ago.`
+          );
+        }
+      }
+    }, 15000); // Check every 15 seconds for faster recovery detection
   }
 
 // Most concise approach
@@ -769,8 +879,8 @@ generateJSONFiles() {
       fs.writeFileSync(filepath, JSON.stringify(outputData, null, 2));
       fs.writeFileSync(latestPath, JSON.stringify(outputData, null, 2));
       
-      // Upload to S3 if enabled
-      if (this.s3Uploader.enabled) {
+      // Upload to S3 if enabled and we have aircraft data
+      if (this.s3Uploader.enabled && aircraftArray.length > 0) {
         // Upload timestamped file
         const s3Key = this.s3Uploader.generateS3Key(filename);
         this.s3Uploader.uploadWithRetry(filepath, s3Key).catch(error => {
@@ -783,6 +893,8 @@ generateJSONFiles() {
         //     console.error(`Background S3 upload failed for latest.json:`, error);
         //   });
         // }
+      } else if (this.s3Uploader.enabled && aircraftArray.length === 0) {
+        console.log(`S3 upload skipped: 0 aircraft detected (upstream likely dead)`);
       }
       
       const withPos = aircraftArray.filter(a => a.lat && a.lon && a.lat !== "").length;
