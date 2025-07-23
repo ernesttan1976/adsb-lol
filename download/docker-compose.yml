@@ -1,56 +1,7 @@
-version: '3.8'
-
 services:
-  readsb-data-collector:
-    build: ./custom-readsb
-    container_name: readsb-data-collector
-    hostname: readsb-data-collector
-    restart: unless-stopped
-    
-    deploy:
-      resources:
-        limits:
-          memory: 2G
-        reservations:
-          memory: 512M
-    
-    environment:
-      - TZ=Asia/Singapore
-      - READSB_DEVICE_TYPE=none
-      - READSB_NET_ONLY=true
-      - READSB_NET_CONNECTOR=out.adsb.lol,1365,beast_in
-      - READSB_LAT=1.345073
-      - READSB_LON=103.946810
-      - READSB_MAX_RANGE=999999
-      - READSB_NET_BEAST_OUTPUT_PORT=30105
-      - READSB_NET_BEAST_INPUT_PORT=30104
-      - READSB_WRITE_JSON_EVERY=5
-      - READSB_JSON_LOCATION_ACCURACY=2
-      - READSB_STATS_EVERY=60
-      - READSB_NET_HEARTBEAT=30
-      - READSB_INTERACTIVE_TTL=180
-      - READSB_QUIET=false
-    
-    volumes:
-      - ./json_output:/run/readsb
-    
-    networks:
-      - adsb_network
-    
-    # Health check to ensure port 30105 is listening
-    healthcheck:
-      test: ["CMD-SHELL", "nc -z localhost 30105 || exit 1"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 60s
-
   beast-json-processor:
     image: node:18-alpine
     container_name: beast-json-processor
-    depends_on:
-      readsb-data-collector:
-        condition: service_healthy  # Wait for readsb to be healthy
     restart: unless-stopped
     
     env_file:
@@ -60,6 +11,8 @@ services:
       - TZ=Asia/Singapore
       - NODE_ENV=production
       - H3_RESOLUTION=3
+      - BEAST_HOST=out.adsb.lol  # Connect directly to adsb.lol
+      - BEAST_PORT=1365          # Same as readsb
     
     volumes:
       - ./beast-processor:/app
@@ -67,7 +20,7 @@ services:
     
     working_dir: /app
     
-    command: sh -c "npm install && npm start"
+    command: sh -c "sleep 10 && npm install && npm start"
     
     networks:
       - adsb_network

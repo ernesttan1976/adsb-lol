@@ -598,8 +598,8 @@ class EmailNotifier {
 
 class SimplifiedBeastProcessor {
 constructor() {
-  this.host = 'readsb-data-collector';
-  this.port = 30105;
+  this.host = process.env.BEAST_HOST || 'readsb-data-collector';
+  this.port = process.env.BEAST_PORT || 30105;
   this.aircraftDB = new Map();
   this.cprTracker = new EnhancedCPRAircraftTracker();
   this.outputDir = './output';
