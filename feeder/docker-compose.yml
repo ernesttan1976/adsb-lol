@@ -62,13 +62,6 @@ services:
       - /tmp:exec,size=64M
       - /var/log:size=32M
 
-    healthcheck:
-      test: ["CMD", "sh", "-c", "[ $$(( $$(date +%s) % 600 )) -lt 30 ]"]
-      interval: 30s
-      timeout: 10s
-      retries: 1
-      start_period: 30s
-
 volumes:
   adsb_data:
   adsb_history:
