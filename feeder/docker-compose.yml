@@ -4,8 +4,8 @@ services:
     container_name: adsb-ultrafeeder
     hostname: adsb-ultrafeeder
     restart: unless-stopped
-    
-    # Privileged mode for USB access
+    # device_cgroup_rules:
+    #   - "c 189:* rwm"
     privileged: true
     devices:
       - /dev/bus/usb:/dev/bus/usb
@@ -29,7 +29,9 @@ services:
       # Location
       - READSB_LAT=1.345073
       - READSB_LON=103.946810
-      - READSB_ALT=30
+      - READSB_ALT=30m
+      - READSB_RX_LOCATION_ACCURACY=2
+      - READSB_STATS_RANGE=true
 
       # UUID (used by all services)
       - UUID=87ae0f6b-a467-4a5c-9e27-b252c75dd769
@@ -38,7 +40,7 @@ services:
       - MLAT_USER=Singapore6441
       
       # ADSB.lol Feed Configuration
-      - ULTRAFEEDER_CONFIG=adsb,in.adsb.lol,30004,beast_reduce_plus_out,uuid=87ae0f6b-a467-4a5c-9e27-b252c75dd769
+      - ULTRAFEEDER_CONFIG=adsb,in.adsb.lol,30004,beast_reduce_plus_out
       
       # MLAT Configuration - FIXED (no duplicate --user)
       - MLAT_CONFIG=feed.adsb.lol,31090,39000,--privacy

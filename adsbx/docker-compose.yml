@@ -8,7 +8,7 @@ services:
       - "8080:80"
     environment:
       - READSB_DEVICE_TYPE=none
-      - READSB_NET_CONNECTOR=host.docker.internal,30005,raw_in
+      - READSB_NET_CONNECTOR=172.28.254.152,30006,raw_in
       
       - READSB_LAT=1.345073
       - READSB_LON=103.946810
@@ -17,8 +17,14 @@ services:
       - UUID=87ae0f6b-a467-4a5c-9e27-b252c75dd769
       - MLAT_SITE_NAME=adsb.techdad.work
       - TZ=Asia/Singapore
-      - ULTRAFEEDER_CONFIG=adsb,feed.adsbexchange.com,30004,beast_reduce_out;mlat,feed.adsbexchange.com,31090,39001
-      
+      - ULTRAFEEDER_CONFIG=
+          adsb,in.adsb.lol,30004,beast_reduce_plus_out,uuid=87ae0f6b-a467-4a5c-9e27-b252c75dd769;
+          mlat,in.adsb.lol,31090,39002,uuid=87ae0f6b-a467-4a5c-9e27-b252c75dd769
+      - MLAT_USER=Singapore6441
+
+          # adsb,feed.adsbexchange.com,30004,beast_reduce_out,uuid=87ae0f6b-a467-4a5c-9e27-b252c75dd769;
+          # mlat,feed.adsbexchange.com,31090,39001,uuid=87ae0f6b-a467-4a5c-9e27-b252c75dd769;
+
     volumes:
       - ultrafeeder_globe_history:/var/globe_history
       - ultrafeeder_graphs1090:/var/lib/collectd

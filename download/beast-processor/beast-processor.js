@@ -598,8 +598,8 @@ class EmailNotifier {
 
 class SimplifiedBeastProcessor {
 constructor() {
-  this.host = 'readsb-data-collector';
-  this.port = 30105;
+  this.host = 'readsb';  // Changed from 'out.adsb.lol'
+  this.port = 30901;        // Changed from 1337 (standard beast port)
   this.aircraftDB = new Map();
   this.cprTracker = new EnhancedCPRAircraftTracker();
   this.outputDir = './output';
@@ -631,29 +631,48 @@ constructor() {
 }
   
   decodeBeastMessage(data) {
-    if (data.length < 23 || data[0] !== 0x1A) return null;
+    if (data.length < 2 || data[0] !== 0x1A) return null;
     
     const msgType = data[1];
-    const timestampBytes = data.slice(2, 8);
     
+    // Beast message format:
+    // 0x1A <type> <6-byte timestamp> <1-byte signal> <message>
+    // Total minimum length = 1 + 1 + 6 + 1 + message_length
+    
+    let messageLength;
+    let totalLength;
+    
+    if (msgType === 0x31) {
+      messageLength = 7;   // Short Mode S message (56 bits = 7 bytes)
+      totalLength = 1 + 1 + 6 + 1 + 7; // = 16 bytes
+    } else if (msgType === 0x32) {
+      messageLength = 14;  // Long Mode S message (112 bits = 14 bytes)  
+      totalLength = 1 + 1 + 6 + 1 + 14; // = 23 bytes
+    } else if (msgType === 0x33) {
+      messageLength = 14;  // Extended squitter (112 bits = 14 bytes)
+      totalLength = 1 + 1 + 6 + 1 + 14; // = 23 bytes
+    } else {
+      // Unknown message type, skip
+      return null;
+    }
+    
+    if (data.length < totalLength) {
+      return null;
+    }
+    
+    // Extract timestamp (6 bytes starting at offset 2)
+    const timestampBytes = data.slice(2, 8);
     let timestamp = 0;
     for (let i = 0; i < 6; i++) {
       timestamp = (timestamp << 8) | timestampBytes[i];
     }
     
+    // Skip signal strength byte at offset 8
+    // Message starts at offset 9
+    const message = data.slice(9, 9 + messageLength);
+    
     const timestampMs = timestamp / 12000.0;
     const utcTimestamp = new Date(this.startTime + timestampMs).toISOString();
-    
-    let message;
-    if (msgType === 0x33) {
-      if (data.length < 23) return null;
-      message = data.slice(9, 23);
-    } else if (msgType === 0x32) {
-      if (data.length < 16) return null;
-      message = data.slice(9, 16);
-    } else {
-      return null;
-    }
     
     return {
       timestamp: utcTimestamp,
@@ -724,30 +743,51 @@ constructor() {
   
   processBeastStream() {
     const client = new net.Socket();
+    let totalBytesReceived = 0;
+    let dataEvents = 0;
+    
+    console.log(`Attempting to connect to ${this.host}:${this.port} (BEAST feed)...`);
     
     client.connect(this.port, this.host, () => {
-      console.log(`Connected to Beast stream - Enhanced CPR with low NIC preservation`);
+      console.log(`✓ Connected to BEAST stream at ${this.host}:${this.port} - Enhanced CPR with low NIC preservation`);
+      
+      // Set timeout to detect if no data comes through
+      setTimeout(() => {
+        if (totalBytesReceived === 0) {
+          console.log(`❌ No data received after 30 seconds - may need active feeder status`);
+        }
+      }, 30000);
     });
     
     client.on('data', (data) => {
+      dataEvents++;
+      totalBytesReceived += data.length;
+      
+      // Log every data event for the first 10 events, then every 10 seconds
+      if (dataEvents <= 10 || dataEvents % 100 === 0) {
+        console.log(`📊 Data event #${dataEvents}: ${data.length} bytes, total: ${totalBytesReceived}, sample: ${data.slice(0, 8).toString('hex')}`);
+      }
+      
       this.buffer = Buffer.concat([this.buffer, data]);
       this.processBuffer();
     });
     
     client.on('close', () => {
+      console.log(`✗ Connection to ${this.host}:${this.port} closed (received ${totalBytesReceived} bytes total), reconnecting in 5 seconds...`);
       setTimeout(() => this.processBeastStream(), 5000);
     });
     
     client.on('error', (err) => {
+      console.error(`✗ Connection error to ${this.host}:${this.port}:`, err.message);
       setTimeout(() => this.processBeastStream(), 5000);
     });
   }
   
   processBuffer() {
-    while (this.buffer.length >= 23) {
+    while (this.buffer.length >= 2) {
       const syncPos = this.buffer.indexOf(0x1A);
       if (syncPos === -1) {
-        this.buffer = this.buffer.slice(-22);
+        this.buffer = this.buffer.slice(-1);
         break;
       }
       
@@ -758,8 +798,16 @@ constructor() {
       if (this.buffer.length < 2) break;
       
       const msgType = this.buffer[1];
-      let msgLen = msgType === 0x33 ? 23 : msgType === 0x32 ? 16 : 0;
-      if (!msgLen) {
+      
+      let msgLen;
+      if (msgType === 0x31) {
+        msgLen = 16; // 1+1+6+1+7
+      } else if (msgType === 0x32) {
+        msgLen = 23; // 1+1+6+1+14  
+      } else if (msgType === 0x33) {
+        msgLen = 23; // 1+1+6+1+14
+      } else {
+        // Unknown type, skip this byte and continue
         this.buffer = this.buffer.slice(1);
         continue;
       }
@@ -782,7 +830,7 @@ constructor() {
     const icao = fields.hex;
     const now = Date.now();
     
-    // Update last data received timestamp
+    // Only update this when we actually process real aircraft data
     this.lastDataReceived = now;
     
     if (!this.aircraftDB.has(icao)) {
