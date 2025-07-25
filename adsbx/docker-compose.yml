@@ -5,30 +5,26 @@ services:
     hostname: ultrafeeder
     restart: unless-stopped
     privileged: true
-    device_cgroup_rules:
-      - 'c 189:* rwm'
+    devices:
+      - /dev/bus/usb:/dev/bus/usb
     ports:
       - "8080:80"
     environment:
-      # RTL-SDR Configuration
       - READSB_DEVICE_TYPE=rtlsdr
       - READSB_RTLSDR_DEVICE=00000001
-      - READSB_GAIN=autogain
-      - READSB_RTLSDR_PPM=20
+      - READSB_GAIN=49.6
+      - READSB_RTLSDR_PPM=15
       - READSB_FREQ=1090000000
-      - READSB_NET_VERBATIM=true  # Enable more detailed logging
-      
-      # Location (replace with your coordinates)
+
       - READSB_LAT=1.345073
       - READSB_LON=103.946810
       - READSB_ALT=30m
       
-      # ADS-B Exchange Configuration
       - UUID=87ae0f6b-a467-4a5c-9e27-b252c75dd769
       - MLAT_SITE_NAME=adsb.techdad.work
+      - MLAT_USER=Singapore6441
+
       - TZ=Asia/Singapore
-      
-      # Feed Configuration for ADS-B Exchange
       - ULTRAFEEDER_CONFIG=adsb,feed.adsbexchange.com,30004,beast_reduce_out;mlat,feed.adsbexchange.com,31090,39001
       
     volumes:
